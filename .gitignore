@@ -1,0 +1,12 @@
+node_modules/
+.DS_Store
+*.pmtiles
+*.osm.pbf
+*.mbtiles
+*.sqlite
+*.sqlite3
+release-staging/
+build/
+dist/
+tmp/
+.cache/

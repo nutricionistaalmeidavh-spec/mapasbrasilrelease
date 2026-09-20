@@ -1,0 +1,16 @@
+{
+  "name": "artisys-mapas-brasil-release",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "test": "node --test",
+    "validate": "node scripts/validate-manifest.mjs",
+    "manifest:build": "node scripts/build-manifest.mjs",
+    "checksum": "node scripts/checksum.mjs",
+    "release:verify": "node scripts/verify-release.mjs"
+  }
+}
