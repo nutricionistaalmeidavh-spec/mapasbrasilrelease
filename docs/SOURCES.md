@@ -21,3 +21,16 @@ Referência oficial:
 https://www.openstreetmap.org/copyright
 
 O projeto não implica endosso por OpenStreetMap, OpenStreetMap Foundation ou seus contribuidores.
+
+## P1 — Protomaps Basemap daily build
+
+A primeira geração real usa o Protomaps Basemap daily build como *Produced Work* baseado em OpenStreetMap. A geração não baixa o planet completo: o CLI PMTiles usa HTTP Range Requests para extrair os subarquivos definidos pelo catálogo.
+
+- descoberta: o build diário mais recente disponível dentro dos últimos 7 dias UTC;
+- URL-base: `https://build.protomaps.com/YYYYMMDD.pmtiles`;
+- ferramenta: `pmtiles` CLI v1.31.2;
+- `brasil-base`: bounds do catálogo, zoom 0–7;
+- `sp`: bounds do catálogo, zoom 7–14;
+- cada draft inclui `SOURCE_INFO.json` com URL, build/data, licença e versão da ferramenta.
+
+Como a extração é baseada em tiles que intersectam o bounding box, tiles de zoom baixo podem conter contexto fora do limite administrativo. O pacote é um mapa-base de navegação, não um limite jurídico/cadastral.
