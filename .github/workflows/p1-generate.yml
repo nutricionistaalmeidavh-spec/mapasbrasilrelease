@@ -40,6 +40,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25.x'
+          cache: false
 
       - name: Validate repository before map generation
         run: |
@@ -48,8 +49,11 @@ jobs:
           npm run validate
 
       - name: Install pinned PMTiles CLI
+        shell: bash
         run: |
-          go install github.com/protomaps/go-pmtiles/cmd/pmtiles@${PMTILES_VERSION}
+          set -euo pipefail
+          go install github.com/protomaps/go-pmtiles@${PMTILES_VERSION}
+          ln -sf "$(go env GOPATH)/bin/go-pmtiles" "$(go env GOPATH)/bin/pmtiles"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           "$(go env GOPATH)/bin/pmtiles" --help >/dev/null
 
