@@ -23,7 +23,10 @@ export async function verifyRelease({ manifestPath, assetsDir, catalogPath = DEF
   let manifest;
   let catalog;
   try {
-    [manifest, catalog] = await Promise.all([readFile(manifestPath, 'utf8').then(JSON.parse), loadCatalog(catalogPath)]);
+    [manifest, catalog] = await Promise.all([
+      readFile(manifestPath, 'utf8').then(JSON.parse),
+      loadCatalog(catalogPath)
+    ]);
   } catch (error) {
     return { valid: false, errors: [`unable to load release inputs: ${error.message}`] };
   }
@@ -39,10 +42,51 @@ export async function verifyRelease({ manifestPath, assetsDir, catalogPath = DEF
   }
 
   const regularFiles = new Set(entries.filter((entry) => entry.isFile()).map((entry) => entry.name));
-  const expectedAssets = new Map(manifest.maps.filter((entry) => entry.available).map((entry) => [entry.asset, entry]));
+  const expectedAssets = new Map(
+    manifest.maps
+      .filter((entry) => entry.available)
+      .map((entry) => [entry.asset, entry])
+  );
+
+  if (regularFiles.has('SHA256SUMS.txt')) {
+    try {
+      const sumsText = await readFile(join(assetsDir, 'SHA256SUMS.txt'), 'utf8');
+      const sums = new Map();
+      for (const [index, rawLine] of sumsText.split(/\r?\n/).entries()) {
+        if (rawLine.length === 0) continue;
+        const match = /^([0-9a-f]{64}) {2}([^/\\]+)$/.exec(rawLine);
+        if (!match || match[2].includes('..')) {
+          errors.push(`invalid SHA256SUMS line ${index + 1}`);
+          continue;
+        }
+        const [, digest, filename] = match;
+        if (sums.has(filename)) {
+          errors.push(`duplicate SHA256SUMS entry: ${filename}`);
+          continue;
+        }
+        sums.set(filename, digest);
+      }
+
+      for (const [filename, digest] of sums) {
+        const expected = expectedAssets.get(filename);
+        if (!expected) {
+          if (filename.endsWith('.pmtiles')) errors.push(`SHA256SUMS undeclared asset: ${filename}`);
+          continue;
+        }
+        if (digest !== expected.sha256) errors.push(`SHA256SUMS digest mismatch for ${filename}`);
+      }
+      for (const filename of expectedAssets.keys()) {
+        if (!sums.has(filename)) errors.push(`SHA256SUMS missing ${filename}`);
+      }
+    } catch (error) {
+      errors.push(`unable to verify SHA256SUMS.txt: ${error.message}`);
+    }
+  }
 
   for (const filename of regularFiles) {
-    if (filename.endsWith('.pmtiles') && !expectedAssets.has(filename)) errors.push(`undeclared pmtiles asset: ${filename}`);
+    if (filename.endsWith('.pmtiles') && !expectedAssets.has(filename)) {
+      errors.push(`undeclared pmtiles asset: ${filename}`);
+    }
   }
 
   for (const [filename, entry] of expectedAssets) {
@@ -50,6 +94,7 @@ export async function verifyRelease({ manifestPath, assetsDir, catalogPath = DEF
       errors.push(`missing asset ${filename}`);
       continue;
     }
+
     const path = join(assetsDir, filename);
     try {
       const fileStat = await stat(path);
@@ -57,9 +102,13 @@ export async function verifyRelease({ manifestPath, assetsDir, catalogPath = DEF
         errors.push(`asset is not a regular file: ${filename}`);
         continue;
       }
-      if (fileStat.size !== entry.size) errors.push(`size mismatch for ${filename}: expected ${entry.size}, got ${fileStat.size}`);
+      if (fileStat.size !== entry.size) {
+        errors.push(`size mismatch for ${filename}: expected ${entry.size}, got ${fileStat.size}`);
+      }
       const digest = await sha256File(path);
-      if (digest !== entry.sha256) errors.push(`sha256 mismatch for ${filename}: expected ${entry.sha256}, got ${digest}`);
+      if (digest !== entry.sha256) {
+        errors.push(`sha256 mismatch for ${filename}: expected ${entry.sha256}, got ${digest}`);
+      }
     } catch (error) {
       errors.push(`unable to verify ${filename}: ${error.message}`);
     }

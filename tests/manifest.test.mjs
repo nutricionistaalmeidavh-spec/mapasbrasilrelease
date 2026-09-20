@@ -9,7 +9,10 @@ const manifestPath = fileURLToPath(new URL('../catalog/maps-manifest.json', impo
 const clone = (value) => structuredClone(value);
 
 async function loadFixture() {
-  const [catalog, manifest] = await Promise.all([loadCatalog(), readFile(manifestPath, 'utf8').then(JSON.parse)]);
+  const [catalog, manifest] = await Promise.all([
+    loadCatalog(),
+    readFile(manifestPath, 'utf8').then(JSON.parse)
+  ]);
   return { catalog, manifest };
 }
 
@@ -26,7 +29,8 @@ function makeSpAvailable(manifest) {
 
 test('initial manifest validates with all 28 packages unavailable', async () => {
   const { catalog, manifest } = await loadFixture();
-  assert.deepEqual(await validateManifest(manifest, catalog), { valid: true, errors: [] });
+  const result = await validateManifest(manifest, catalog);
+  assert.deepEqual(result, { valid: true, errors: [] });
 });
 
 test('missing catalog ID fails validation', async () => {
@@ -55,7 +59,8 @@ test('unknown geographic ID fails validation', async () => {
 
 test('available entry requires version asset size sha256 and sourceDate', async () => {
   const { catalog, manifest } = await loadFixture();
-  manifest.maps.find((map) => map.id === 'sp').available = true;
+  const sp = manifest.maps.find((map) => map.id === 'sp');
+  sp.available = true;
   const result = await validateManifest(manifest, catalog);
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((error) => error.includes('available entry sp requires')));
@@ -63,7 +68,8 @@ test('available entry requires version asset size sha256 and sourceDate', async 
 
 test('unavailable entry rejects release-specific metadata', async () => {
   const { catalog, manifest } = await loadFixture();
-  manifest.maps.find((map) => map.id === 'sp').asset = 'sp.pmtiles';
+  const sp = manifest.maps.find((map) => map.id === 'sp');
+  sp.asset = 'sp.pmtiles';
   const result = await validateManifest(manifest, catalog);
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((error) => error.includes('unavailable entry sp')));
@@ -82,7 +88,8 @@ test('asset path separators and dot-dot are rejected', async () => {
 
 test('sha256 must be 64 lowercase hexadecimal characters', async () => {
   const { catalog, manifest } = await loadFixture();
-  makeSpAvailable(manifest).sha256 = 'A'.repeat(64);
+  const sp = makeSpAvailable(manifest);
+  sp.sha256 = 'A'.repeat(64);
   const result = await validateManifest(manifest, catalog);
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((error) => error.includes('invalid sha256')));
@@ -90,7 +97,8 @@ test('sha256 must be 64 lowercase hexadecimal characters', async () => {
 
 test('size must be a positive integer when available', async () => {
   const { catalog, manifest } = await loadFixture();
-  makeSpAvailable(manifest).size = 0;
+  const sp = makeSpAvailable(manifest);
+  sp.size = 0;
   const result = await validateManifest(manifest, catalog);
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((error) => error.includes('invalid size')));
@@ -118,4 +126,21 @@ test('releaseVersion must match YYYY.MM.PATCH', async () => {
   const result = await validateManifest(manifest, catalog);
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((error) => error.includes('releaseVersion')));
+});
+
+test('invalid calendar dates fail instead of being normalized by JavaScript', async () => {
+  const { catalog, manifest } = await loadFixture();
+  const sp = makeSpAvailable(manifest);
+  sp.sourceDate = '2026-02-31';
+  const result = await validateManifest(manifest, catalog);
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((error) => error.includes('invalid sourceDate')));
+});
+
+test('generatedAt rejects impossible calendar dates', async () => {
+  const { catalog, manifest } = await loadFixture();
+  manifest.generatedAt = '2026-02-31T00:00:00Z';
+  const result = await validateManifest(manifest, catalog);
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((error) => error.includes('generatedAt')));
 });
