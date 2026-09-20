@@ -34,3 +34,9 @@ Nunca apagar o release publicado anterior ao publicar um novo. Se a nova versão
 ## Regra do consumidor
 
 Branches, commits, pull requests, artifacts de Actions e releases draft/prerelease não são endpoints de produção para o Sistema Lavoura.
+
+## P1 — primeiros pacotes reais
+
+O P1 automatiza a geração de `brasil-base.pmtiles` (z0–7) e `sp.pmtiles` (z7–14) a partir de um build diário recente do Protomaps. O workflow resolve o build mais novo disponível nos últimos sete dias, extrai somente os recortes necessários via HTTP Range Requests, valida cada arquivo com o CLI PMTiles, gera metadados/manifesto/checksums e monta `br-maps-v2026.09.0` como **draft**.
+
+Depois do upload, o workflow baixa novamente os assets do draft pela API do GitHub e repete a validação. O P1 nunca publica o release automaticamente e recusa sobrescrever um release já publicado com o mesmo tag.

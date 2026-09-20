@@ -1,0 +1,218 @@
+name: P1 generate real map packages
+
+on:
+  push:
+    branches:
+      - feat/p1-real-map-packages
+    paths:
+      - '.github/workflows/p1-generate.yml'
+      - 'scripts/**'
+      - 'catalog/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tests/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mapas-brasil-p1-real-packages
+  cancel-in-progress: true
+
+env:
+  RELEASE_VERSION: '2026.09.0'
+  RELEASE_TAG: 'br-maps-v2026.09.0'
+  PMTILES_VERSION: 'v1.31.2'
+  PMTILES_LINUX_SHA256: '3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate repository before map generation
+        run: |
+          npm ci
+          npm test
+          npm run validate
+
+      - name: Install pinned PMTiles CLI binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${PMTILES_VERSION#v}"
+          archive="go-pmtiles_${version}_Linux_x86_64.tar.gz"
+          url="https://github.com/protomaps/go-pmtiles/releases/download/${PMTILES_VERSION}/${archive}"
+          curl --fail --location --silent --show-error "$url" -o /tmp/pmtiles.tar.gz
+          echo "${PMTILES_LINUX_SHA256}  /tmp/pmtiles.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/pmtiles.tar.gz -C "$HOME/.local/bin" pmtiles
+          chmod +x "$HOME/.local/bin/pmtiles"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/pmtiles" --help >/dev/null
+
+      - name: Resolve recent Protomaps daily build
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/resolve-daily-build.mjs --days 7 > source.json
+          cat source.json
+          echo "url=$(jq -r '.url' source.json)" >> "$GITHUB_OUTPUT"
+          echo "date=$(jq -r '.sourceDate' source.json)" >> "$GITHUB_OUTPUT"
+          echo "build=$(jq -r '.build' source.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Build P1 extraction plan
+        run: |
+          node scripts/build-extract-plan.mjs --ids brasil-base,sp > extract-plan.json
+          cat extract-plan.json
+
+      - name: Extract Brasil base and Sao Paulo
+        env:
+          SOURCE_URL: ${{ steps.source.outputs.url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-staging
+          while IFS= read -r row; do
+            id=$(jq -r '.id' <<<"$row")
+            asset=$(jq -r '.asset' <<<"$row")
+            bbox=$(jq -r '.bbox' <<<"$row")
+            minzoom=$(jq -r '.minZoom' <<<"$row")
+            maxzoom=$(jq -r '.maxZoom' <<<"$row")
+            echo "Extracting $id -> $asset (z${minzoom}-${maxzoom}, bbox=$bbox)"
+            pmtiles extract "$SOURCE_URL" "release-staging/$asset" \
+              --bbox="$bbox" \
+              --minzoom="$minzoom" \
+              --maxzoom="$maxzoom" \
+              --overfetch=0 \
+              --download-threads=4
+            pmtiles verify "release-staging/$asset"
+          done < <(jq -c '.[]' extract-plan.json)
+
+      - name: Build metadata, manifest and checksums
+        env:
+          SOURCE_DATE: ${{ steps.source.outputs.date }}
+          SOURCE_URL: ${{ steps.source.outputs.url }}
+          SOURCE_BUILD: ${{ steps.source.outputs.build }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          node scripts/create-build-metadata.mjs \
+            --ids brasil-base,sp \
+            --assets release-staging \
+            --release-version "$RELEASE_VERSION" \
+            --source-date "$SOURCE_DATE" \
+            --output release-staging/build-metadata.json
+          node scripts/build-manifest.mjs \
+            --metadata release-staging/build-metadata.json \
+            --output release-staging/maps-manifest.json \
+            --release-version "$RELEASE_VERSION" \
+            --generated-at "$generated_at"
+          node scripts/checksum.mjs \
+            release-staging/brasil-base.pmtiles \
+            release-staging/sp.pmtiles > release-staging/SHA256SUMS.txt
+          node --input-type=module - <<'NODE'
+          import { writeFile } from 'node:fs/promises';
+          const info = {
+            sourceProvider: 'Protomaps Basemap daily build',
+            sourceUrl: process.env.SOURCE_URL,
+            sourceBuild: process.env.SOURCE_BUILD,
+            sourceDate: process.env.SOURCE_DATE,
+            primaryMapData: 'OpenStreetMap',
+            primaryMapDataLicense: 'ODbL-1.0',
+            additionalOpenDataSources: true,
+            sourceLegalUrl: 'https://protomaps.com/legal',
+            osmCopyrightUrl: 'https://www.openstreetmap.org/copyright',
+            attribution: 'Protomaps © OpenStreetMap contributors',
+            pmtilesCli: process.env.PMTILES_VERSION
+          };
+          await writeFile('release-staging/SOURCE_INFO.json', JSON.stringify(info, null, 2) + '\n');
+          NODE
+          cat release-staging/build-metadata.json
+          cat release-staging/SHA256SUMS.txt
+
+      - name: Verify complete local release staging
+        run: |
+          node scripts/validate-manifest.mjs release-staging/maps-manifest.json catalog/states.json
+          node scripts/verify-release.mjs --manifest release-staging/maps-manifest.json --assets release-staging
+          stat -c '%n %s bytes' release-staging/*.pmtiles
+
+      - name: Create or update draft GitHub Release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_DATE: ${{ steps.source.outputs.date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\") | .id" | head -n 1 || true)
+
+          if [[ -n "$release_id" ]]; then
+            is_draft=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '.draft')
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Release ${RELEASE_TAG} already exists and is not a draft; refusing to overwrite it." >&2
+              exit 1
+            fi
+          else
+            release_id=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
+              -f tag_name="$RELEASE_TAG" \
+              -f target_commitish="main" \
+              -f name="Mapas Brasil ${RELEASE_VERSION}" \
+              -f body="P1: brasil-base e São Paulo. Fonte Protomaps Basemap ${SOURCE_DATE}, baseada principalmente em OpenStreetMap e outras fontes abertas. Draft até homologação." \
+              -F draft=true \
+              -F prerelease=false \
+              --jq '.id')
+          fi
+
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+          for file in \
+            release-staging/brasil-base.pmtiles \
+            release-staging/sp.pmtiles \
+            release-staging/maps-manifest.json \
+            release-staging/SHA256SUMS.txt \
+            release-staging/SOURCE_INFO.json; do
+            name=$(basename "$file")
+            old_asset_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              --jq ".[] | select(.name == \"${name}\") | .id" | head -n 1 || true)
+            if [[ -n "$old_asset_id" ]]; then
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${old_asset_id}"
+            fi
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$file" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}" >/dev/null
+          done
+
+      - name: Round-trip draft assets and verify again
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p roundtrip
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            --jq '.[] | [.id, .name] | @tsv' > /tmp/assets.tsv
+          while IFS=$'\t' read -r asset_id name; do
+            [[ -z "$asset_id" ]] && continue
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "roundtrip/${name}"
+          done < /tmp/assets.tsv
+          node scripts/validate-manifest.mjs roundtrip/maps-manifest.json catalog/states.json
+          node scripts/verify-release.mjs --manifest roundtrip/maps-manifest.json --assets roundtrip
+          echo 'Draft release round-trip verified.'
+          stat -c '%n %s bytes' roundtrip/*.pmtiles

@@ -11,6 +11,9 @@
     "validate": "node scripts/validate-manifest.mjs",
     "manifest:build": "node scripts/build-manifest.mjs",
     "checksum": "node scripts/checksum.mjs",
-    "release:verify": "node scripts/verify-release.mjs"
+    "release:verify": "node scripts/verify-release.mjs",
+    "source:resolve": "node scripts/resolve-daily-build.mjs",
+    "extract:plan": "node scripts/build-extract-plan.mjs",
+    "metadata:build": "node scripts/create-build-metadata.mjs"
   }
 }
