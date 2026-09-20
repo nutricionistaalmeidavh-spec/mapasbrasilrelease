@@ -23,7 +23,7 @@ permissions:
 
 concurrency:
   group: mapas-brasil-p2-all-packages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   PMTILES_VERSION: 'v1.31.2'
@@ -98,7 +98,14 @@ jobs:
             exit 1
           fi
           tag="br-maps-v${version}"
-          previous_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          previous_tag=''
+          if latest_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" 2>/dev/null); then
+            previous_tag=$(jq -r '.tag_name // empty' <<<"$latest_json")
+          fi
+          body="P2: Brasil-base + 26 estados + DF. Todos os 28 pacotes devem ser verificados antes da publicação."
+          if [[ -n "$previous_tag" ]]; then
+            body="$body Rollback preservado em $previous_tag."
+          fi
           release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
             --jq ".[] | select(.tag_name == \"${tag}\") | .id" | head -n 1 || true)
           if [[ -n "$release_id" ]]; then
@@ -108,10 +115,6 @@ jobs:
               exit 1
             fi
           else
-            body="P2: Brasil-base + 26 estados + DF. Todos os 28 pacotes devem ser verificados antes da publicação."
-            if [[ -n "$previous_tag" ]]; then
-              body="$body Rollback preservado em $previous_tag."
-            fi
             release_id=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
               -f tag_name="$tag" \
               -f target_commitish='main' \
@@ -121,6 +124,11 @@ jobs:
               -F prerelease=false \
               --jq '.id')
           fi
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -f name="Mapas Brasil ${version}" \
+            -f body="$body" \
+            -F draft=true \
+            -F prerelease=false >/dev/null
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "id=$release_id" >> "$GITHUB_OUTPUT"
