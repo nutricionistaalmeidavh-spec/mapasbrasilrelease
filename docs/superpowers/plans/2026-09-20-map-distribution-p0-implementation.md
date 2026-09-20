@@ -2,42 +2,39 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Transform `mapasbrasilrelease` from an empty distribution repository into a validated, versioned, zero-cost catalog and release-verification system for Brazilian offline PMTiles packages, without generating real map binaries yet.
+**Goal:** Transform `mapasbrasilrelease` into a validated, versioned, zero-cost catalog and release-verification system for Brazilian offline PMTiles packages, without generating real map binaries yet.
 
-**Architecture:** Keep tracked Git content small and deterministic: a geographic catalog, a schema-versioned consumer manifest, Node.js validation/checksum/release tools, tests, documentation, and CI. Large `.pmtiles` and raw OSM extracts never enter Git; later they are attached only to GitHub Releases. The consumer contract is fail-closed and uses the latest published release manifest; draft releases are validated before publication.
+**Architecture:** Keep tracked Git content small and deterministic: a geographic catalog, schema-versioned consumer manifest, Node.js validation/checksum/release tools, tests, documentation, and CI. Large `.pmtiles` and raw OSM extracts never enter Git; later they are attached only to GitHub Releases. The contract is fail-closed and consumers use only the latest published non-prerelease release.
 
-**Tech Stack:** Node.js 22 ESM, built-in `node:test`, `Ajv` 8 for JSON Schema validation, GitHub Actions, GitHub Releases, SHA-256.
+**Tech Stack:** Node.js 22 ESM, built-in `node:test`, Ajv 8, GitHub Actions, GitHub Releases, SHA-256.
 
 **Spec:** `docs/superpowers/specs/2026-09-20-map-distribution-architecture-design.md`
 
 ## Global Constraints
 
 - Mandatory infrastructure cost must remain R$ 0.
-- No ArtiSys-owned application server is required for distribution.
-- The repository remains public so release assets are publicly downloadable.
-- Large map binaries belong only in GitHub Releases, never in regular Git commits.
-- The consumer must be able to validate a download without trusting transport alone.
-- The manifest contract must be versioned and backwards-conscious.
-- OpenStreetMap attribution must remain visible in consumer products that render OSM-derived data.
-- Data sources and transformation provenance must be documented.
-- The generation pipeline must be reproducible outside GitHub Actions.
-- A failed or interrupted package build must never publish a manifest that claims the package is available.
-- P0 does not generate `brasil-base.pmtiles` or any state PMTiles package.
-- Node.js 22 is the supported runtime for repository tooling and CI.
+- No ArtiSys-owned application server is required.
+- Repository remains public.
+- `.pmtiles`, `.osm.pbf`, `.mbtiles`, generated tile databases and build directories must never enter Git history.
+- Every available package requires exact byte size and SHA-256.
+- Schema contract starts at `schemaVersion: 1`.
+- OpenStreetMap attribution and source provenance must be documented.
+- Generation must remain reproducible from a local workstation or Woodpecker worker.
+- A failed or interrupted build must never produce a published manifest entry with `available: true`.
+- P0 does not generate real PMTiles packages.
+- Node.js 22 is the supported runtime.
 
 ## Review Focus
 
-1. **Manifest says an asset is available but metadata is incomplete:** validation must fail before release publication.
-2. **A malicious or malformed asset filename contains `/`, `\\`, or `..`:** validation must reject it rather than allowing path traversal.
-3. **A release file has the expected name but wrong bytes:** release verification must reject a SHA-256 mismatch.
-4. **The catalog and manifest drift apart:** validation must fail if any of the 28 geographic IDs is missing, duplicated, or unknown.
-5. **A GitHub Release is still a draft:** consumers must not use it; documentation and release flow must make the latest published release the only consumer source.
+1. Incomplete `available: true` metadata must fail validation.
+2. Asset names containing `/`, `\\`, or `..` must fail before filesystem access.
+3. Same filename with wrong bytes must fail SHA-256 verification.
+4. Catalog/manifest drift must fail when an ID is missing, duplicated, or unknown.
+5. Draft/prerelease releases must never be the consumer source.
 
 ---
 
 ## File Structure
-
-Files created or modified by this plan:
 
 ```text
 README.md
@@ -72,40 +69,20 @@ docs/
   FORMAT.md
   RELEASES.md
   SOURCES.md
-.github/
-  workflows/
-    validate.yml
-    release-check.yml
+.github/workflows/
+  validate.yml
+  release-check.yml
 ```
-
-Responsibilities are intentionally separated:
-
-- `catalog/states.json`: stable geographic identities and default map metadata.
-- `catalog/build-metadata.json`: release-specific verified package metadata; initially empty.
-- `catalog/maps-manifest.json`: generated consumer-facing snapshot.
-- `catalog/maps-manifest.schema.json`: structural contract for schema v1.
-- `scripts/lib/catalog.mjs`: catalog loading and stable ID expectations.
-- `scripts/lib/manifest.mjs`: schema + semantic validation.
-- `scripts/lib/sha256.mjs`: reusable file hashing.
-- CLI scripts: thin wrappers around reusable library functions.
-- tests: deterministic fixtures only; no real PMTiles.
 
 ---
 
-### Task 1: Bootstrap the Node repository and protect Git from map binaries
+### Task 1: Bootstrap Node tooling and protect Git history
 
-**Files:**
-- Create: `package.json`
-- Create: `package-lock.json`
-- Create: `.gitignore`
+**Files:** `package.json`, `package-lock.json`, `.gitignore`
 
-**Interfaces:**
-- Produces: repository scripts `npm test`, `npm run validate`, `npm run manifest:build`, `npm run release:verify`.
-- Produces: Node 22 ESM environment used by all later tasks.
+**Produces:** `npm test`, `npm run validate`, `npm run manifest:build`, `npm run checksum`, `npm run release:verify`.
 
-- [ ] **Step 1: Write the package manifest**
-
-Create `package.json` exactly with the following intent and script surface:
+- [ ] **Step 1: Create `package.json`**
 
 ```json
 {
@@ -113,9 +90,7 @@ Create `package.json` exactly with the following intent and script surface:
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=22 <23"
-  },
+  "engines": { "node": ">=22 <23" },
   "scripts": {
     "test": "node --test",
     "validate": "node scripts/validate-manifest.mjs",
@@ -123,28 +98,19 @@ Create `package.json` exactly with the following intent and script surface:
     "checksum": "node scripts/checksum.mjs",
     "release:verify": "node scripts/verify-release.mjs"
   },
-  "devDependencies": {
-    "ajv": "^8.17.1"
-  }
+  "devDependencies": { "ajv": "^8.17.1" }
 }
 ```
 
-- [ ] **Step 2: Install dependencies and create the lockfile**
-
-Run:
+- [ ] **Step 2: Create the lockfile**
 
 ```bash
 npm install
 ```
 
-Expected:
-- exit code `0`;
-- `package-lock.json` created;
-- `ajv` resolved under `node_modules`.
+Expected: exit `0`, `package-lock.json` created.
 
-- [ ] **Step 3: Protect generated and large geographic files**
-
-Create `.gitignore`:
+- [ ] **Step 3: Create `.gitignore`**
 
 ```gitignore
 node_modules/
@@ -161,27 +127,15 @@ tmp/
 .cache/
 ```
 
-- [ ] **Step 4: Verify ignored binary classes**
-
-Run:
+- [ ] **Step 4: Verify ignore rules**
 
 ```bash
 git check-ignore -v sample.pmtiles sample.osm.pbf sample.mbtiles release-staging/test.pmtiles
 ```
 
-Expected: every path is matched by `.gitignore`.
+Expected: all four paths matched.
 
-- [ ] **Step 5: Run baseline tests**
-
-Run:
-
-```bash
-npm test
-```
-
-Expected: exit code `0` with zero tests discovered at this bootstrap point.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add package.json package-lock.json .gitignore
@@ -190,35 +144,27 @@ git commit -m "build: bootstrap map distribution tooling"
 
 ---
 
-### Task 2: Create the authoritative Brazil geographic catalog
+### Task 2: Create the authoritative 28-package Brazil catalog
 
-**Files:**
-- Create: `catalog/states.json`
-- Create: `scripts/lib/catalog.mjs`
-- Create: `tests/catalog.test.mjs`
+**Files:** `catalog/states.json`, `scripts/lib/catalog.mjs`, `tests/catalog.test.mjs`
 
-**Interfaces:**
-- Produces: `loadCatalog(path?) -> Promise<Array<MapCatalogEntry>>`.
-- Produces: `EXPECTED_IDS`, an immutable ordered array of the 28 supported package IDs.
-- `MapCatalogEntry` shape: `{ id, name, kind, minZoom, maxZoom, bounds }`.
+**Produces:** `loadCatalog(path?)`, `EXPECTED_IDS`.
 
-- [ ] **Step 1: Write the failing catalog contract test**
-
-Create `tests/catalog.test.mjs`:
+- [ ] **Step 1: Write failing catalog tests**
 
 ```js
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadCatalog, EXPECTED_IDS } from '../scripts/lib/catalog.mjs';
 
-test('catalog contains brasil-base plus all 26 states and DF exactly once', async () => {
+test('catalog contains brasil-base plus 26 states and DF exactly once', async () => {
   const catalog = await loadCatalog();
   assert.equal(catalog.length, 28);
   assert.deepEqual(catalog.map((entry) => entry.id), EXPECTED_IDS);
   assert.equal(new Set(catalog.map((entry) => entry.id)).size, 28);
 });
 
-test('catalog entries expose safe zooms and ordered finite bounds', async () => {
+test('catalog zooms and bounds are structurally safe', async () => {
   const catalog = await loadCatalog();
   for (const entry of catalog) {
     assert.ok(Number.isInteger(entry.minZoom));
@@ -233,19 +179,15 @@ test('catalog entries expose safe zooms and ordered finite bounds', async () => 
 });
 ```
 
-- [ ] **Step 2: Run the focused test and confirm the gap**
-
-Run:
+Run before implementation:
 
 ```bash
 node --test tests/catalog.test.mjs
 ```
 
-Expected: FAIL because `scripts/lib/catalog.mjs` does not exist.
+Expected: FAIL because the loader does not exist.
 
-- [ ] **Step 3: Create stable catalog loader and IDs**
-
-Create `scripts/lib/catalog.mjs`:
+- [ ] **Step 2: Implement catalog loader**
 
 ```js
 import { readFile } from 'node:fs/promises';
@@ -267,179 +209,196 @@ export async function loadCatalog(path = DEFAULT_CATALOG) {
 }
 ```
 
-- [ ] **Step 4: Create the 28-entry geographic catalog**
+- [ ] **Step 3: Create `catalog/states.json`**
 
-Create `catalog/states.json` with entries in exactly the `EXPECTED_IDS` order. Use these names and kinds:
+Use exactly these IDs/names/kinds:
 
 ```text
-brasil-base = Brasil (kind national)
-ac = Acre
-al = Alagoas
-ap = Amapá
-am = Amazonas
-ba = Bahia
-ce = Ceará
-df = Distrito Federal
-es = Espírito Santo
-go = Goiás
-ma = Maranhão
-mt = Mato Grosso
-ms = Mato Grosso do Sul
-mg = Minas Gerais
-pa = Pará
-pb = Paraíba
-pr = Paraná
-pe = Pernambuco
-pi = Piauí
-rj = Rio de Janeiro
-rn = Rio Grande do Norte
-rs = Rio Grande do Sul
-ro = Rondônia
-rr = Roraima
-sc = Santa Catarina
-sp = São Paulo
-se = Sergipe
-to = Tocantins
+brasil-base Brasil national
+ac Acre state
+al Alagoas state
+ap Amapá state
+am Amazonas state
+ba Bahia state
+ce Ceará state
+df Distrito Federal federal-district
+es Espírito Santo state
+go Goiás state
+ma Maranhão state
+mt Mato Grosso state
+ms Mato Grosso do Sul state
+mg Minas Gerais state
+pa Pará state
+pb Paraíba state
+pr Paraná state
+pe Pernambuco state
+pi Piauí state
+rj Rio de Janeiro state
+rn Rio Grande do Norte state
+rs Rio Grande do Sul state
+ro Rondônia state
+rr Roraima state
+sc Santa Catarina state
+sp São Paulo state
+se Sergipe state
+to Tocantins state
 ```
 
-Use `minZoom: 0, maxZoom: 7` for `brasil-base`, and `minZoom: 7, maxZoom: 14` for state/DF entries. Bounds must be conservative geographic envelopes that contain the entire corresponding unit; P0 tests assert ordering and finiteness, not cadastral precision. Record the provenance/precision limitation in `docs/SOURCES.md` in Task 7 so later PMTiles generation may refine them against the exact source extract.
+Each entry shape:
 
-- [ ] **Step 5: Run the catalog tests**
+```json
+{
+  "id": "sp",
+  "name": "São Paulo",
+  "kind": "state",
+  "minZoom": 7,
+  "maxZoom": 14,
+  "bounds": [-53.2, -25.4, -44.1, -19.7]
+}
+```
 
-Run:
+Use `minZoom: 0`, `maxZoom: 7` for `brasil-base`, otherwise `7` and `14`. Bounds must conservatively contain each unit; they are discovery/display envelopes, not legal boundaries. `docs/SOURCES.md` must say that production extents will be refined from the actual source extract in P1.
+
+- [ ] **Step 4: Run test and commit**
 
 ```bash
 node --test tests/catalog.test.mjs
-```
-
-Expected: 2 tests PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
 git add catalog/states.json scripts/lib/catalog.mjs tests/catalog.test.mjs
 git commit -m "feat: add authoritative Brazil map catalog"
 ```
 
+Expected: 2 tests PASS.
+
 ---
 
-### Task 3: Encode schema v1 and fail-closed manifest validation
+### Task 3: Add schema v1 and fail-closed manifest validation
 
-**Files:**
-- Create: `catalog/maps-manifest.schema.json`
-- Create: `catalog/maps-manifest.json`
-- Create: `scripts/lib/manifest.mjs`
-- Create: `scripts/validate-manifest.mjs`
-- Create: `tests/manifest.test.mjs`
+**Files:** `catalog/maps-manifest.schema.json`, `catalog/maps-manifest.json`, `scripts/lib/manifest.mjs`, `scripts/validate-manifest.mjs`, `tests/manifest.test.mjs`
 
-**Interfaces:**
-- Consumes: `loadCatalog()` and `EXPECTED_IDS` from Task 2.
-- Produces: `validateManifest(manifest, catalog) -> { valid: boolean, errors: string[] }`.
-- Produces CLI: `node scripts/validate-manifest.mjs [manifestPath] [catalogPath]` with exit `0` when valid and `1` when invalid.
+**Produces:** `validateManifest(manifest, catalog) -> { valid, errors }`.
 
-- [ ] **Step 1: Write negative-first manifest tests**
+- [ ] **Step 1: Write manifest test harness and negative cases**
 
-Create `tests/manifest.test.mjs` that loads the checked-in manifest, asserts it passes, then deep-clones it for each negative case. Include these exact behaviors:
+Use this concrete helper pattern:
 
 ```js
-test('initial manifest validates with all 28 packages unavailable', ...);
-test('missing catalog ID fails validation', ...);
-test('duplicate geographic ID fails validation', ...);
-test('unknown geographic ID fails validation', ...);
-test('available entry requires version asset size sha256 and sourceDate', ...);
-test('unavailable entry rejects release-specific metadata', ...);
-test('asset path separators and dot-dot are rejected', ...);
-test('sha256 must be 64 lowercase hexadecimal characters', ...);
-test('size must be a positive integer when available', ...);
-test('invalid zoom range fails validation', ...);
-test('invalid bounds order fails validation', ...);
-test('releaseVersion must match YYYY.MM.PATCH', ...);
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { validateManifest } from '../scripts/lib/manifest.mjs';
+import { loadCatalog } from '../scripts/lib/catalog.mjs';
+
+const clone = (value) => structuredClone(value);
+const find = (manifest, id) => manifest.maps.find((entry) => entry.id === id);
+
+async function fixtures() {
+  return {
+    manifest: JSON.parse(await readFile(new URL('../catalog/maps-manifest.json', import.meta.url), 'utf8')),
+    catalog: await loadCatalog()
+  };
+}
+
+async function expectInvalid(mutator) {
+  const { manifest, catalog } = await fixtures();
+  const candidate = clone(manifest);
+  mutator(candidate);
+  const result = await validateManifest(candidate, catalog);
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.length > 0);
+}
 ```
 
-For the path traversal review-focus test, mutate `sp.asset` to each of:
+Create tests with these exact mutations:
+
+| Test | Mutation |
+|---|---|
+| valid initial manifest | none; expect `valid === true`, 28 entries, all unavailable |
+| missing ID | remove `sp` from `maps` |
+| duplicate ID | push a clone of `sp` |
+| unknown ID | change `sp.id` to `xx` |
+| incomplete available | set `sp.available=true`, leave release fields null |
+| unavailable with metadata | set `sp.version='2026.09.0'` while unavailable |
+| traversal | make `sp` fully available, then test `../sp.pmtiles`, `maps/sp.pmtiles`, `maps\\sp.pmtiles` |
+| bad digest | fully available `sp`, set `sha256='ABC'` |
+| bad size | fully available `sp`, set `size=0` |
+| bad zoom | set `sp.minZoom=15`, `sp.maxZoom=14` |
+| bad bounds | set `sp.bounds=[-44,-20,-53,-25]` |
+| bad release version | set top-level `releaseVersion='v1'` |
+
+For a fully available synthetic `sp`, use:
 
 ```js
-['../sp.pmtiles', 'maps/sp.pmtiles', 'maps\\sp.pmtiles']
+Object.assign(find(candidate, 'sp'), {
+  available: true,
+  version: '2026.09.0',
+  asset: 'sp.pmtiles',
+  size: 12,
+  sha256: 'a'.repeat(64),
+  sourceDate: '2026-09-20'
+});
 ```
 
-and assert every variant fails.
-
-- [ ] **Step 2: Run the focused test and confirm the gap**
-
-Run:
+Run before implementation:
 
 ```bash
 node --test tests/manifest.test.mjs
 ```
 
-Expected: FAIL because validator/schema/manifest do not yet exist.
+Expected: FAIL because schema/validator do not exist.
 
-- [ ] **Step 3: Create JSON Schema v1**
+- [ ] **Step 2: Create JSON Schema v1**
 
-Create `catalog/maps-manifest.schema.json` with:
+Schema requirements:
 
-- Draft 2020-12 schema declaration;
-- top-level `additionalProperties: false`;
-- required top-level keys `schemaVersion`, `releaseVersion`, `generatedAt`, `source`, `maps`;
-- `schemaVersion` constant `1`;
-- `releaseVersion` pattern `^[0-9]{4}\\.[0-9]{2}\\.[0-9]+$`;
-- `generatedAt` as a string with `date-time` format only if format support is configured; otherwise enforce a strict UTC ISO regex in schema and semantic validation;
-- `source.provider` constant `OpenStreetMap`;
-- `source.license` constant `ODbL-1.0`;
-- each map entry with `additionalProperties: false`;
-- `kind` enum `national|state|federal-district`;
-- `available` boolean;
-- `version`, `asset`, `size`, `sha256`, `sourceDate` allowing null for unavailable entries;
-- `minZoom`/`maxZoom` integers in `[0, 22]`;
-- `bounds` fixed-length array of four numbers.
-
-Do not encode catalog-completeness or availability cross-field rules only in JSON Schema; those belong to semantic validation so error messages remain explicit.
-
-- [ ] **Step 4: Implement structural and semantic validation**
-
-Create `scripts/lib/manifest.mjs` using Ajv and explicit semantic checks.
-
-Required semantic algorithm:
-
-```js
-export async function validateManifest(manifest, catalog) {
-  const errors = [];
-  // 1. Ajv schema validation.
-  // 2. Require exactly the same set of IDs as catalog.
-  // 3. Reject duplicates and unknown IDs.
-  // 4. Enforce deterministic asset name: brasil-base.pmtiles or <id>.pmtiles.
-  // 5. available=true => version/asset/size/sha256/sourceDate all present and valid.
-  // 6. available=false => version/asset/size/sha256/sourceDate all null.
-  // 7. asset must be basename only: no '/', '\\', or '..'.
-  // 8. sha256 regex /^[0-9a-f]{64}$/.
-  // 9. size integer > 0 when available.
-  // 10. minZoom <= maxZoom.
-  // 11. west < east and south < north.
-  // 12. map name/kind/zoom/bounds must match the stable catalog entry.
-  return { valid: errors.length === 0, errors };
-}
+```text
+$schema = https://json-schema.org/draft/2020-12/schema
+additionalProperties = false at top level and map-entry level
+schemaVersion const 1
+releaseVersion pattern ^[0-9]{4}\.[0-9]{2}\.[0-9]+$
+generatedAt strict UTC ISO string
+source.provider const OpenStreetMap
+source.license const ODbL-1.0
+kind enum national|state|federal-district
+minZoom/maxZoom integer 0..22
+bounds array exactly 4 numbers
+version/asset/size/sha256/sourceDate accept null so semantic validation can enforce availability rules
 ```
 
-Ajv errors must be normalized to readable strings rather than dumped as opaque objects.
+- [ ] **Step 3: Implement semantic validation**
 
-- [ ] **Step 5: Create the initial consumer manifest**
+`validateManifest()` must perform these checks in order and accumulate readable error strings:
 
-Create `catalog/maps-manifest.json` with:
+```text
+1. Run Ajv structural validation.
+2. Reject duplicate IDs.
+3. Reject IDs not present in catalog.
+4. Require the manifest ID set to equal the catalog ID set exactly.
+5. Require name/kind/minZoom/maxZoom/bounds to match the catalog entry.
+6. available=true requires non-null version, asset, size, sha256, sourceDate.
+7. available=false requires those five fields to be null.
+8. Derived asset name must equal brasil-base.pmtiles for brasil-base, otherwise <id>.pmtiles.
+9. Asset must be a basename: reject '/', '\\', and '..'.
+10. sha256 must match /^[0-9a-f]{64}$/ when available.
+11. size must be an integer > 0 when available.
+12. minZoom <= maxZoom.
+13. bounds satisfy west < east and south < north.
+```
+
+- [ ] **Step 4: Create initial manifest**
+
+Top level:
 
 ```json
 {
   "schemaVersion": 1,
   "releaseVersion": "2026.09.0",
   "generatedAt": "2026-09-20T00:00:00Z",
-  "source": {
-    "provider": "OpenStreetMap",
-    "license": "ODbL-1.0"
-  },
+  "source": { "provider": "OpenStreetMap", "license": "ODbL-1.0" },
   "maps": []
 }
 ```
 
-Populate `maps` from all 28 catalog entries. Every initial entry must have:
+Populate all 28 entries in catalog order. Every entry starts with:
 
 ```json
 {
@@ -452,105 +411,86 @@ Populate `maps` from all 28 catalog entries. Every initial entry must have:
 }
 ```
 
-and the stable `id`, `name`, `kind`, `minZoom`, `maxZoom`, `bounds` copied from `states.json`.
+plus stable catalog fields.
 
-- [ ] **Step 6: Create CLI validation wrapper**
+- [ ] **Step 5: Implement CLI wrapper**
 
-Create `scripts/validate-manifest.mjs` that:
+`node scripts/validate-manifest.mjs [manifestPath] [catalogPath]` must print `Manifest valid: <path>` on success; on failure print each error to stderr and set exit code `1`.
 
-1. accepts optional manifest and catalog paths;
-2. defaults to checked-in catalog files;
-3. prints `Manifest valid: <path>` on success;
-4. prints each validation error to stderr on failure;
-5. sets `process.exitCode = 1` on failure.
-
-- [ ] **Step 7: Run focused and CLI checks**
-
-Run:
+- [ ] **Step 6: Verify and commit**
 
 ```bash
 node --test tests/manifest.test.mjs
 npm run validate
-```
-
-Expected:
-- manifest suite PASS;
-- CLI prints a valid-manifest message;
-- both commands exit `0`.
-
-- [ ] **Step 8: Commit**
-
-```bash
 git add catalog/maps-manifest.schema.json catalog/maps-manifest.json scripts/lib/manifest.mjs scripts/validate-manifest.mjs tests/manifest.test.mjs
 git commit -m "feat: add fail-closed manifest contract validation"
 ```
 
+Expected: manifest tests PASS; CLI exits `0`.
+
 ---
 
-### Task 4: Build manifests deterministically from verified build metadata
+### Task 4: Build manifest deterministically from verified metadata
 
-**Files:**
-- Create: `catalog/build-metadata.json`
-- Create: `scripts/build-manifest.mjs`
-- Create: `tests/build-manifest.test.mjs`
+**Files:** `catalog/build-metadata.json`, `scripts/build-manifest.mjs`, `tests/build-manifest.test.mjs`
 
-**Interfaces:**
-- Consumes: geographic catalog from Task 2.
-- Consumes metadata array entries shaped as `{ id, version, sourceDate, size, sha256, minZoom, maxZoom }`.
-- Produces: deterministic manifest JSON with availability driven only by metadata entries.
+**Produces:** `buildManifest({ catalogPath, metadataPath, outputPath, releaseVersion, generatedAt })`.
 
-- [ ] **Step 1: Write failing build tests**
+- [ ] **Step 1: Write build tests using temp files**
 
-Create `tests/build-manifest.test.mjs` covering:
+Required cases:
 
-```js
-test('empty build metadata produces all 28 entries unavailable', ...);
-test('verified metadata for sp produces only sp as available', ...);
-test('metadata for unknown catalog ID fails', ...);
-test('duplicate metadata IDs fail', ...);
-test('incomplete available metadata fails instead of publishing a partial entry', ...);
+```text
+A. [] metadata -> 28 unavailable entries.
+B. one complete sp metadata record -> only sp available and asset derived as sp.pmtiles.
+C. metadata id xx -> reject.
+D. two metadata records with id sp -> reject.
+E. sp record missing sha256 -> reject and write no output.
 ```
 
-Use a temporary output file under `os.tmpdir()`; never mutate the checked-in manifest during tests.
+Use this complete synthetic metadata object for case B:
 
-- [ ] **Step 2: Run the focused test and confirm the gap**
+```js
+{
+  id: 'sp',
+  version: '2026.09.0',
+  sourceDate: '2026-09-20',
+  size: 12,
+  sha256: 'a'.repeat(64),
+  minZoom: 7,
+  maxZoom: 14
+}
+```
 
-Run:
+Run before implementation:
 
 ```bash
 node --test tests/build-manifest.test.mjs
 ```
 
-Expected: FAIL because `scripts/build-manifest.mjs` does not exist.
+Expected: FAIL because builder does not exist.
 
-- [ ] **Step 3: Create initial empty build metadata**
-
-Create `catalog/build-metadata.json`:
+- [ ] **Step 2: Create `catalog/build-metadata.json`**
 
 ```json
 []
 ```
 
-- [ ] **Step 4: Implement deterministic manifest builder**
+- [ ] **Step 3: Implement builder**
 
-`scripts/build-manifest.mjs` must export a reusable function:
+Exact behavior:
 
-```js
-export async function buildManifest({ catalogPath, metadataPath, outputPath, releaseVersion, generatedAt }) { ... }
+```text
+read catalog -> read metadata -> reject unknown/duplicate/incomplete metadata -> map catalog in stable order -> derive unavailable/available entries -> assemble top-level object -> call validateManifest -> if invalid throw -> write JSON to <output>.tmp with 2-space indent + newline -> atomic rename to output.
 ```
 
-Rules:
+Asset derivation is fixed:
 
-- catalog order controls output order;
-- absent metadata => unavailable entry with all release fields null;
-- present metadata => available entry only after all fields validate;
-- asset name is derived, never supplied: `brasil-base.pmtiles` or `<id>.pmtiles`;
-- unknown or duplicate metadata IDs throw;
-- generated output is validated using `validateManifest()` before writing;
-- write to `<output>.tmp` first, then rename atomically;
-- deterministic JSON formatting is two spaces + trailing newline.
+```js
+const assetFor = (id) => id === 'brasil-base' ? 'brasil-base.pmtiles' : `${id}.pmtiles`;
+```
 
-CLI arguments:
+CLI flags are exactly:
 
 ```text
 --metadata <path>
@@ -559,33 +499,25 @@ CLI arguments:
 --generated-at <UTC ISO timestamp>
 ```
 
-Defaults may target checked-in files except `generated-at`, which must be supplied explicitly in CI/release automation to keep builds reproducible.
+`--generated-at` is mandatory so reproducible builds do not silently inject wall-clock time.
 
-- [ ] **Step 5: Prove initial checked-in manifest can be regenerated**
+- [ ] **Step 4: Verify and commit**
 
-Run:
-
-```bash
-node scripts/build-manifest.mjs \
-  --metadata catalog/build-metadata.json \
-  --output /tmp/maps-manifest.json \
-  --release-version 2026.09.0 \
-  --generated-at 2026-09-20T00:00:00Z
-```
-
-On Windows PowerShell use `$env:TEMP` instead of `/tmp`.
-
-Expected: generated file validates and contains all 28 entries unavailable.
-
-- [ ] **Step 6: Run focused tests**
+Linux/macOS:
 
 ```bash
+node scripts/build-manifest.mjs --metadata catalog/build-metadata.json --output /tmp/maps-manifest.json --release-version 2026.09.0 --generated-at 2026-09-20T00:00:00Z
 node --test tests/build-manifest.test.mjs
 ```
 
-Expected: all tests PASS.
+PowerShell equivalent:
 
-- [ ] **Step 7: Commit**
+```powershell
+node scripts/build-manifest.mjs --metadata catalog/build-metadata.json --output "$env:TEMP\maps-manifest.json" --release-version 2026.09.0 --generated-at 2026-09-20T00:00:00Z
+node --test tests/build-manifest.test.mjs
+```
+
+Commit:
 
 ```bash
 git add catalog/build-metadata.json scripts/build-manifest.mjs tests/build-manifest.test.mjs
@@ -594,75 +526,67 @@ git commit -m "feat: add deterministic manifest builder"
 
 ---
 
-### Task 5: Add SHA-256 tooling with deterministic fixture coverage
+### Task 5: Add streaming SHA-256 tooling
 
-**Files:**
-- Create: `scripts/lib/sha256.mjs`
-- Create: `scripts/checksum.mjs`
-- Create: `tests/checksum.test.mjs`
-- Create: `tests/fixtures/checksum-sample.txt`
+**Files:** `scripts/lib/sha256.mjs`, `scripts/checksum.mjs`, `tests/checksum.test.mjs`, `tests/fixtures/checksum-sample.txt`
 
-**Interfaces:**
-- Produces: `sha256File(path) -> Promise<string>` lowercase 64-char digest.
-- CLI: `node scripts/checksum.mjs <file> [file...]`, output `<sha256>  <basename>`.
+**Produces:** `sha256File(path) -> Promise<string>`.
 
-- [ ] **Step 1: Create a fixed fixture and failing test**
+- [ ] **Step 1: Create fixture and failing test**
 
-Create `tests/fixtures/checksum-sample.txt` containing exactly:
+`tests/fixtures/checksum-sample.txt` contains exactly `ArtiSys Mapas Brasil` plus final newline.
 
-```text
-ArtiSys Mapas Brasil
-```
-
-with a final newline.
-
-Create `tests/checksum.test.mjs` that independently computes the expected digest using `createHash('sha256').update(Buffer.from('ArtiSys Mapas Brasil\n')).digest('hex')` and compares it with `sha256File()`.
-
-Also assert:
+Test:
 
 ```js
-assert.match(actual, /^[0-9a-f]{64}$/);
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { sha256File } from '../scripts/lib/sha256.mjs';
+
+test('sha256File returns the expected lowercase digest', async () => {
+  const path = fileURLToPath(new URL('./fixtures/checksum-sample.txt', import.meta.url));
+  const expected = createHash('sha256').update(Buffer.from('ArtiSys Mapas Brasil\n')).digest('hex');
+  const actual = await sha256File(path);
+  assert.equal(actual, expected);
+  assert.match(actual, /^[0-9a-f]{64}$/);
+});
 ```
 
-- [ ] **Step 2: Run the focused test and confirm the gap**
+Run and expect missing-module failure:
 
 ```bash
 node --test tests/checksum.test.mjs
 ```
 
-Expected: FAIL because `scripts/lib/sha256.mjs` is missing.
-
-- [ ] **Step 3: Implement streamed SHA-256 calculation**
-
-Create `scripts/lib/sha256.mjs` using `createReadStream()` piped into a `createHash('sha256')` instance; do not read large map files fully into memory.
-
-Export:
+- [ ] **Step 2: Implement streaming hash**
 
 ```js
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+
 export function sha256File(path) {
-  return new Promise((resolve, reject) => { ... });
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(path);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
 }
 ```
 
-- [ ] **Step 4: Create checksum CLI**
+- [ ] **Step 3: Implement CLI and verify**
 
-`scripts/checksum.mjs` must:
-
-- require at least one path;
-- hash paths sequentially by default to avoid unnecessary disk contention;
-- print lowercase SHA-256 and basename;
-- exit non-zero when any file cannot be read.
-
-- [ ] **Step 5: Run focused and CLI checks**
+CLI requires at least one file, hashes sequentially, prints `<digest>  <basename>`, and exits non-zero on read failure.
 
 ```bash
 node --test tests/checksum.test.mjs
 node scripts/checksum.mjs tests/fixtures/checksum-sample.txt
 ```
 
-Expected: PASS and one 64-character digest line.
-
-- [ ] **Step 6: Commit**
+Commit:
 
 ```bash
 git add scripts/lib/sha256.mjs scripts/checksum.mjs tests/checksum.test.mjs tests/fixtures/checksum-sample.txt
@@ -671,36 +595,29 @@ git commit -m "feat: add streaming SHA-256 tooling"
 
 ---
 
-### Task 6: Verify staged release assets against manifest metadata
+### Task 6: Verify staged release assets
 
-**Files:**
-- Create: `scripts/verify-release.mjs`
-- Create: `tests/verify-release.test.mjs`
+**Files:** `scripts/verify-release.mjs`, `tests/verify-release.test.mjs`
 
-**Interfaces:**
-- Consumes: validated manifest and a local asset directory.
-- Produces: `verifyRelease({ manifestPath, assetsDir }) -> Promise<{ valid, errors }>`.
-- CLI: `node scripts/verify-release.mjs --manifest <path> --assets <dir>`.
+**Produces:** `verifyRelease({ manifestPath, assetsDir }) -> { valid, errors }` and CLI.
 
-- [ ] **Step 1: Write failing release-verification tests**
+- [ ] **Step 1: Write release-verification test matrix**
 
-Use `mkdtemp()` under the OS temp directory and synthesize a manifest entry for `sp` whose size and SHA-256 match a small fixture copied to `sp.pmtiles`.
+Tests use `mkdtemp()` and a small file named `sp.pmtiles`. The synthetic manifest entry uses the exact `stat.size` and `sha256File()` result from that temporary file.
 
-Required tests:
+Required cases:
 
-```js
-test('release with no available packages validates against an empty directory', ...);
-test('available asset with matching size and sha256 passes', ...);
-test('missing declared asset fails', ...);
-test('same filename with wrong bytes fails sha256 verification', ...);
-test('same digest expectation with wrong byte size fails', ...);
-test('undeclared pmtiles asset is rejected', ...);
-test('path-like asset name is rejected before filesystem access', ...);
+```text
+1. all packages unavailable + empty directory -> valid.
+2. sp available + matching basename/size/digest -> valid.
+3. declared sp missing -> invalid.
+4. sp exists but bytes changed after digest calculation -> invalid digest.
+5. sp manifest size altered by +1 -> invalid size.
+6. undeclared mg.pmtiles present -> invalid.
+7. manifest asset ../sp.pmtiles -> invalid before filesystem lookup.
 ```
 
-The wrong-bytes test directly covers Review Focus item 3.
-
-- [ ] **Step 2: Run the focused test and confirm the gap**
+Run before implementation:
 
 ```bash
 node --test tests/verify-release.test.mjs
@@ -708,166 +625,107 @@ node --test tests/verify-release.test.mjs
 
 Expected: FAIL because verifier does not exist.
 
-- [ ] **Step 3: Implement local release verifier**
+- [ ] **Step 2: Implement verifier**
 
-`verifyRelease()` must:
+Exact algorithm:
 
-1. validate the manifest first;
-2. enumerate only regular files in `assetsDir`;
-3. build the expected set from `available: true` entries plus `maps-manifest.json` and `SHA256SUMS.txt` only when the caller has staged those metadata files;
-4. reject undeclared `.pmtiles` files;
-5. for each available map asset, require exact basename, exact byte size, and exact SHA-256;
-6. return all discovered errors, not only the first;
-7. never execute or parse PMTiles content in P0.
+```text
+load manifest -> load catalog -> validateManifest -> if invalid return those errors -> read assets directory -> consider regular files only -> reject undeclared .pmtiles -> for each available map require exact asset basename -> stat for exact byte size -> stream SHA-256 -> compare lowercase digest -> return all errors.
+```
 
-For an all-unavailable manifest, an empty directory must be valid.
+P0 never executes or parses PMTiles content.
 
-- [ ] **Step 4: Implement CLI argument parsing**
-
-Required invocation:
+CLI syntax:
 
 ```bash
 node scripts/verify-release.mjs --manifest catalog/maps-manifest.json --assets release-staging
 ```
 
-Missing arguments or invalid directories exit non-zero with readable stderr.
+Missing arguments/non-directory paths must exit `1` with readable stderr.
 
-- [ ] **Step 5: Run focused tests**
+- [ ] **Step 3: Verify and commit**
 
 ```bash
 node --test tests/verify-release.test.mjs
-```
-
-Expected: all tests PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
 git add scripts/verify-release.mjs tests/verify-release.test.mjs
 git commit -m "feat: verify staged map release assets"
 ```
 
 ---
 
-### Task 7: Document provenance, release flow, format, and OSM attribution
+### Task 7: Document provenance, format, release lifecycle and attribution
 
-**Files:**
-- Modify: `README.md`
-- Create: `LICENSE-DATA.md`
-- Create: `NOTICE.md`
-- Create: `docs/FORMAT.md`
-- Create: `docs/RELEASES.md`
-- Create: `docs/SOURCES.md`
+**Files:** modify `README.md`; create `LICENSE-DATA.md`, `NOTICE.md`, `docs/FORMAT.md`, `docs/RELEASES.md`, `docs/SOURCES.md`
 
-**Interfaces:**
-- Produces: human-readable contract for maintainers and consumer developers.
-- Produces: explicit rule that consumer apps use only the latest **published** release, never a draft/prerelease/branch manifest.
+- [ ] **Step 1: Replace README**
 
-- [ ] **Step 1: Replace the placeholder README**
+README must state purpose, zero-cost/no-server constraint, Node 22 setup, source-vs-release separation, and these concrete commands:
 
-`README.md` must explain:
+```bash
+npm install
+npm test
+npm run validate
+node scripts/build-manifest.mjs --metadata catalog/build-metadata.json --output ./tmp/maps-manifest.json --release-version 2026.09.0 --generated-at 2026-09-20T00:00:00Z
+npm run checksum -- tests/fixtures/checksum-sample.txt
+npm run release:verify -- --manifest catalog/maps-manifest.json --assets release-staging
+```
 
-- this repository distributes offline Brazilian map packages for ArtiSys products;
-- P0 contains no real `.pmtiles` assets yet;
-- tracked Git source vs GitHub Release assets;
-- Node 22 setup;
-- commands:
-  - `npm install`
-  - `npm test`
-  - `npm run validate`
-  - `npm run manifest:build -- ...`
-  - `npm run checksum -- ...`
-  - `npm run release:verify -- ...`;
-- link to `docs/FORMAT.md`, `docs/RELEASES.md`, `docs/SOURCES.md`;
-- zero-cost/no-ArtiSys-server design constraint.
+It must link `docs/FORMAT.md`, `docs/RELEASES.md`, `docs/SOURCES.md`.
 
-- [ ] **Step 2: Add data-license notice**
+- [ ] **Step 2: Add license and notice**
 
-`LICENSE-DATA.md` must distinguish repository source code from map data and state that OSM-derived distributed data remains subject to ODbL 1.0 obligations. It must link maintainers to the canonical OpenStreetMap copyright/license page rather than copying the full ODbL license text into this repository.
+`LICENSE-DATA.md` distinguishes source code from OSM-derived data and references ODbL 1.0/OpenStreetMap copyright page.
 
-- [ ] **Step 3: Add consumer attribution notice**
-
-`NOTICE.md` must contain the exact consumer-facing attribution text:
+`NOTICE.md` contains exactly:
 
 ```text
 © OpenStreetMap contributors
 https://www.openstreetmap.org/copyright
 ```
 
-and state that consumer applications must keep attribution visible whenever OSM-derived map data is rendered.
+and requires visible attribution in consumer map views.
 
-- [ ] **Step 4: Document manifest and asset format**
+- [ ] **Step 3: Add format documentation**
 
-`docs/FORMAT.md` must document:
+`docs/FORMAT.md` documents schema v1 fields/nullability, 28 IDs, deterministic asset names, byte size, SHA-256, zoom/bounds, and fail-closed handling of future unknown schema versions.
 
-- schema v1 top-level keys;
-- map-entry fields and nullability;
-- deterministic asset naming;
-- SHA-256 requirement;
-- size in bytes;
-- zoom/bounds semantics;
-- the 28 supported IDs;
-- consumer behavior for unknown future schema versions: fail closed and prompt for app update rather than guessing.
+- [ ] **Step 4: Add release documentation**
 
-- [ ] **Step 5: Document draft-to-published release flow**
-
-`docs/RELEASES.md` must define exactly this lifecycle:
+`docs/RELEASES.md` must define:
 
 ```text
-1. Generate/stage candidate files locally or on Woodpecker.
-2. Compute byte sizes and SHA-256.
+1. Stage candidate files locally or on Woodpecker.
+2. Compute size and SHA-256.
 3. Build manifest from verified metadata.
-4. Create GitHub Release as DRAFT with tag br-maps-vYYYY.MM.PATCH.
-5. Upload PMTiles + maps-manifest.json + SHA256SUMS.txt to the draft.
-6. Run release-check against the draft assets.
-7. If verification fails, keep the release draft and replace/fix assets.
-8. Only after verification passes, publish the release.
-9. ArtiSys consumers discover only the latest published non-prerelease release.
+4. Create GitHub Release as DRAFT tagged br-maps-vYYYY.MM.PATCH.
+5. Upload PMTiles + maps-manifest.json + SHA256SUMS.txt.
+6. Run release-check against draft assets.
+7. Fix/replace assets while still draft if any check fails.
+8. Publish only after release-check passes.
+9. Consumer discovers only the latest published non-prerelease release.
+10. Keep previous valid release available for rollback.
 ```
 
-Also document rollback: do not delete the previous valid published release when publishing a new one.
+- [ ] **Step 5: Add source documentation**
 
-- [ ] **Step 6: Document source provenance and bounding-box limitation**
+`docs/SOURCES.md` states intended OSM-derived source, requires exact provider/extract date/tool versions in P1, labels P0 bounds as conservative display envelopes, and disclaims OSM endorsement.
 
-`docs/SOURCES.md` must state:
-
-- primary intended source is OpenStreetMap-derived extracts from an openly redistributable extract provider;
-- exact provider, extract timestamp, and transformation tool versions must be recorded when real packages are generated in P1;
-- P0 state bounds are conservative catalog envelopes used for discovery/display, not cadastral/legal boundaries;
-- exact generated package extents must be measured from the production source pipeline;
-- no endorsement by OpenStreetMap contributors is implied.
-
-- [ ] **Step 7: Run repository tests and validation after documentation changes**
+- [ ] **Step 6: Verify and commit**
 
 ```bash
 npm test
 npm run validate
-```
-
-Expected: both commands exit `0`.
-
-- [ ] **Step 8: Commit**
-
-```bash
 git add README.md LICENSE-DATA.md NOTICE.md docs/FORMAT.md docs/RELEASES.md docs/SOURCES.md
 git commit -m "docs: document map format releases and attribution"
 ```
 
 ---
 
-### Task 8: Add GitHub Actions validation and draft-release verification
+### Task 8: Add CI and draft-release verification workflow
 
-**Files:**
-- Create: `.github/workflows/validate.yml`
-- Create: `.github/workflows/release-check.yml`
+**Files:** `.github/workflows/validate.yml`, `.github/workflows/release-check.yml`
 
-**Interfaces:**
-- `validate.yml`: source/contract CI on push and pull request.
-- `release-check.yml`: manually verifies one existing GitHub draft release by tag before a human publishes it.
-
-- [ ] **Step 1: Add source validation workflow**
-
-Create `.github/workflows/validate.yml`:
+- [ ] **Step 1: Add source-validation workflow**
 
 ```yaml
 name: Validate map catalog
@@ -894,11 +752,9 @@ jobs:
       - run: npm run validate
 ```
 
-- [ ] **Step 2: Add manual draft-release verification workflow**
+- [ ] **Step 2: Add manual draft-release check workflow**
 
-Create `.github/workflows/release-check.yml` with `workflow_dispatch` input `release_tag` and `permissions: contents: read`.
-
-Core steps:
+`release-check.yml` uses `workflow_dispatch` input `release_tag`, `permissions: contents: read`, Node 22, and these core steps:
 
 ```yaml
 - uses: actions/checkout@v4
@@ -914,136 +770,100 @@ Core steps:
   run: |
     mkdir -p release-staging
     gh release download "$RELEASE_TAG" --dir release-staging
-- name: Require release manifest
+- name: Require manifest
   run: test -f release-staging/maps-manifest.json
-- name: Validate release manifest
+- name: Require checksums when PMTiles exist
+  run: |
+    if find release-staging -maxdepth 1 -name '*.pmtiles' -print -quit | grep -q .; then
+      test -f release-staging/SHA256SUMS.txt
+    fi
+- name: Validate manifest
   run: node scripts/validate-manifest.mjs release-staging/maps-manifest.json catalog/states.json
 - name: Verify release assets
   run: node scripts/verify-release.mjs --manifest release-staging/maps-manifest.json --assets release-staging
 ```
 
-Add a shell step that verifies `SHA256SUMS.txt` is present whenever at least one `.pmtiles` asset exists. The verifier remains authoritative for manifest-declared PMTiles metadata.
+P0 must not auto-publish a release.
 
-Do **not** add any step that publishes a draft release automatically in P0. Publication remains an explicit maintainer action after the workflow is green.
-
-- [ ] **Step 3: Validate workflow YAML structure without introducing another dependency**
-
-Inspect both workflow files and run repository tests locally:
+- [ ] **Step 3: Verify locally and commit**
 
 ```bash
 npm test
 npm run validate
-```
-
-Expected: all local checks PASS. GitHub syntax/runtime validation is completed by the PR workflow after push.
-
-- [ ] **Step 4: Commit**
-
-```bash
 git add .github/workflows/validate.yml .github/workflows/release-check.yml
 git commit -m "ci: validate catalog and draft map releases"
 ```
 
+GitHub runtime/syntax validation is confirmed by the PR workflow after push.
+
 ---
 
-### Task 9: Integrated P0 verification and PR readiness
+### Task 9: Integrated verification and PR readiness
 
-**Files:**
-- No planned production changes. Fix only P0 defects revealed by verification, with a focused regression test before each fix.
+**Files:** no planned new source files; only regression fixes if evidence exposes a P0 defect.
 
-**Interfaces:**
-- Consumes: all previous tasks.
-- Produces: fresh evidence that P0 meets the approved spec.
-
-- [ ] **Step 1: Run the complete test suite**
+- [ ] **Step 1: Run broad local verification**
 
 ```bash
 npm test
-```
-
-Expected: exit `0`; all catalog, manifest, builder, checksum, and release-verifier tests PASS.
-
-- [ ] **Step 2: Validate the checked-in manifest**
-
-```bash
 npm run validate
-```
-
-Expected: exit `0`; reports the manifest valid.
-
-- [ ] **Step 3: Regenerate the initial manifest into a temporary file and compare semantically**
-
-```bash
-node scripts/build-manifest.mjs \
-  --metadata catalog/build-metadata.json \
-  --output ./tmp/maps-manifest.generated.json \
-  --release-version 2026.09.0 \
-  --generated-at 2026-09-20T00:00:00Z
-```
-
-Then compare the generated JSON object with `catalog/maps-manifest.json`; expected semantic equality.
-
-- [ ] **Step 4: Verify all-unavailable release staging**
-
-```bash
 mkdir -p release-staging
 node scripts/verify-release.mjs --manifest catalog/maps-manifest.json --assets release-staging
-```
-
-Expected: exit `0` because P0 declares no available PMTiles assets.
-
-- [ ] **Step 5: Prove Git refuses the forbidden artifact classes**
-
-```bash
 git check-ignore -v x.pmtiles x.osm.pbf x.mbtiles release-staging/x.pmtiles
 ```
 
-Expected: every sample path is ignored.
+Expected: tests PASS, manifest valid, empty all-unavailable staging valid, all forbidden classes ignored.
 
-- [ ] **Step 6: Inspect the branch diff for scope and secrets**
+- [ ] **Step 2: Regenerate initial manifest and compare**
 
-Run:
+```bash
+mkdir -p tmp
+node scripts/build-manifest.mjs --metadata catalog/build-metadata.json --output ./tmp/maps-manifest.generated.json --release-version 2026.09.0 --generated-at 2026-09-20T00:00:00Z
+node -e "const fs=require('fs'); const a=JSON.parse(fs.readFileSync('catalog/maps-manifest.json')); const b=JSON.parse(fs.readFileSync('./tmp/maps-manifest.generated.json')); require('assert').deepStrictEqual(a,b); console.log('manifest match')"
+```
+
+Expected: `manifest match`.
+
+- [ ] **Step 3: Inspect diff and tracked files**
 
 ```bash
 git status --short
 git diff main...HEAD --stat
 git diff main...HEAD -- . ':!package-lock.json'
+git ls-files | grep -E '\.(pmtiles|osm\.pbf|mbtiles)$' && exit 1 || true
 ```
 
-Verify:
+Expected: no forbidden binaries, secrets, tokens, generated archives, or out-of-scope files; no auto-publish workflow.
 
-- no `.pmtiles`, `.osm.pbf`, `.mbtiles`, secrets, tokens, or generated archives are tracked;
-- only approved P0 files changed;
-- README/spec/plan accurately describe current behavior;
-- there is no automatic release publication step.
+- [ ] **Step 4: Inspect fresh PR Actions result**
 
-- [ ] **Step 7: Push/update PR and inspect GitHub Actions**
+The `Validate map catalog` workflow on the implementation PR must be green. A previous or local-only run is insufficient evidence.
 
-After the branch is pushed, wait for `Validate map catalog` on the PR and inspect its actual run result. A green local run without a green PR workflow is not sufficient to call CI configured correctly.
+- [ ] **Step 5: Run independent Codex Engineering Guardrails verification**
 
-- [ ] **Step 8: Perform independent code-verification review**
-
-Use `codex-engineering-guardrails:code-verification` read-only against `main...HEAD` with this traceability matrix:
+Use `codex-engineering-guardrails:code-verification` read-only against `main...HEAD` with:
 
 ```text
 28-package catalog -> catalog tests + manifest completeness tests
 fail-closed manifest -> negative manifest tests + npm run validate
 streaming integrity -> checksum test
 release byte/sha verification -> verify-release negative tests
-no binaries in Git -> .gitignore + git check-ignore + diff inspection
+no binaries in Git -> .gitignore + git check-ignore + tracked-file inspection
 published-release-only contract -> docs/RELEASES.md inspection
 CI validation -> fresh PR Actions result
 ```
 
-Verdict must be Pass/Partial/Fail/Inconclusive based on fresh evidence.
+Verdict must be Pass/Partial/Fail/Inconclusive from fresh evidence.
 
-- [ ] **Step 9: Mark PR ready only if verification is clean**
+- [ ] **Step 6: Mark PR ready only if clean**
 
-If and only if:
+Required before ready-for-review:
 
-- local tests PASS;
-- checked-in manifest validates;
-- PR workflow is green;
-- independent verification finds no material P0 defect;
+```text
+local tests PASS
+checked-in manifest validates
+PR workflow green
+independent verification has no material P0 defect
+```
 
-then mark the PR ready for review. Do not merge automatically unless the user separately authorizes the merge.
+Do not merge automatically unless the user separately authorizes merge.
