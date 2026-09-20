@@ -1,11 +1,6 @@
 name: P2 generate all Brazil map packages
 
 on:
-  push:
-    branches:
-      - feat/p2-all-brazil-packages
-    paths:
-      - '.github/workflows/p2-generate-all.yml'
   workflow_dispatch:
     inputs:
       release_version:
@@ -98,6 +93,7 @@ jobs:
             exit 1
           fi
           tag="br-maps-v${version}"
+          release_name="Mapas Brasil ${version}"
           previous_tag=''
           if latest_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" 2>/dev/null); then
             previous_tag=$(jq -r '.tag_name // empty' <<<"$latest_json")
@@ -106,26 +102,30 @@ jobs:
           if [[ -n "$previous_tag" ]]; then
             body="$body Rollback preservado em $previous_tag."
           fi
-          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq ".[] | select(.tag_name == \"${tag}\") | .id" | head -n 1 || true)
-          if [[ -n "$release_id" ]]; then
-            is_draft=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '.draft')
-            if [[ "$is_draft" != 'true' ]]; then
-              echo "Release $tag already exists and is published; refusing overwrite." >&2
-              exit 1
-            fi
-          else
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > /tmp/releases.json
+          published_id=$(jq -r --arg tag "$tag" '.[] | select(.draft == false and .tag_name == $tag) | .id' /tmp/releases.json | head -n 1)
+          if [[ -n "$published_id" ]]; then
+            echo "Release $tag already exists and is published; refusing overwrite." >&2
+            exit 1
+          fi
+
+          release_id=$(node scripts/select-draft-release.mjs \
+            --releases /tmp/releases.json \
+            --tag "$tag" \
+            --name "$release_name")
+          if [[ -z "$release_id" ]]; then
             release_id=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
               -f tag_name="$tag" \
               -f target_commitish='main' \
-              -f name="Mapas Brasil ${version}" \
+              -f name="$release_name" \
               -f body="$body" \
               -F draft=true \
               -F prerelease=false \
               --jq '.id')
           fi
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-            -f name="Mapas Brasil ${version}" \
+            -f name="$release_name" \
             -f body="$body" \
             -F draft=true \
             -F prerelease=false >/dev/null
