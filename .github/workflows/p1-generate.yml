@@ -24,6 +24,7 @@ env:
   RELEASE_VERSION: '2026.09.0'
   RELEASE_TAG: 'br-maps-v2026.09.0'
   PMTILES_VERSION: 'v1.31.2'
+  PMTILES_LINUX_SHA256: '3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f'
 
 jobs:
   generate:
@@ -37,25 +38,26 @@ jobs:
           node-version: 22
           cache: npm
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.x'
-          cache: false
-
       - name: Validate repository before map generation
         run: |
           npm ci
           npm test
           npm run validate
 
-      - name: Install pinned PMTiles CLI
+      - name: Install pinned PMTiles CLI binary
         shell: bash
         run: |
           set -euo pipefail
-          go install github.com/protomaps/go-pmtiles@${PMTILES_VERSION}
-          ln -sf "$(go env GOPATH)/bin/go-pmtiles" "$(go env GOPATH)/bin/pmtiles"
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          "$(go env GOPATH)/bin/pmtiles" --help >/dev/null
+          version="${PMTILES_VERSION#v}"
+          archive="go-pmtiles_${version}_Linux_x86_64.tar.gz"
+          url="https://github.com/protomaps/go-pmtiles/releases/download/${PMTILES_VERSION}/${archive}"
+          curl --fail --location --silent --show-error "$url" -o /tmp/pmtiles.tar.gz
+          echo "${PMTILES_LINUX_SHA256}  /tmp/pmtiles.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/pmtiles.tar.gz -C "$HOME/.local/bin" pmtiles
+          chmod +x "$HOME/.local/bin/pmtiles"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/pmtiles" --help >/dev/null
 
       - name: Resolve recent Protomaps daily build
         id: source
