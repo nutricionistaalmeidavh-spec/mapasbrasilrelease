@@ -1,0 +1,398 @@
+name: P2 generate all Brazil map packages
+
+on:
+  push:
+    branches:
+      - feat/p2-all-brazil-packages
+    paths:
+      - '.github/workflows/p2-generate-all.yml'
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Map release version (YYYY.MM.PATCH)'
+        required: true
+        default: '2026.09.1'
+      publish:
+        description: 'Publish after all 28 packages and release index verify successfully'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mapas-brasil-p2-all-packages
+  cancel-in-progress: false
+
+env:
+  PMTILES_VERSION: 'v1.31.2'
+  PMTILES_LINUX_SHA256: '3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f'
+  MAX_ASSET_BYTES: '2147483648'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      source_url: ${{ steps.source.outputs.url }}
+      source_date: ${{ steps.source.outputs.date }}
+      source_build: ${{ steps.source.outputs.build }}
+      release_version: ${{ steps.release.outputs.version }}
+      release_tag: ${{ steps.release.outputs.tag }}
+      release_id: ${{ steps.release.outputs.id }}
+      previous_tag: ${{ steps.release.outputs.previous_tag }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate repository before P2 generation
+        run: |
+          npm ci
+          npm test
+          npm run validate
+
+      - name: Build complete extraction matrix
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix=$(node scripts/build-p2-matrix.mjs)
+          count=$(jq '.include | length' <<<"$matrix")
+          if [[ "$count" -ne 28 ]]; then
+            echo "Expected 28 packages, got $count" >&2
+            exit 1
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          jq . <<<"$matrix"
+
+      - name: Resolve one recent Protomaps source for the whole release
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/resolve-daily-build.mjs --days 7 > source.json
+          cat source.json
+          echo "url=$(jq -r '.url' source.json)" >> "$GITHUB_OUTPUT"
+          echo "date=$(jq -r '.sourceDate' source.json)" >> "$GITHUB_OUTPUT"
+          echo "build=$(jq -r '.build' source.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse isolated P2 draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ inputs.release_version }}'
+          publish='${{ inputs.publish }}'
+          [[ -n "$version" ]] || version='2026.09.1'
+          [[ -n "$publish" ]] || publish='false'
+          if [[ ! "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]+$ ]]; then
+            echo "Invalid release version: $version" >&2
+            exit 1
+          fi
+          tag="br-maps-v${version}"
+          previous_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${tag}\") | .id" | head -n 1 || true)
+          if [[ -n "$release_id" ]]; then
+            is_draft=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '.draft')
+            if [[ "$is_draft" != 'true' ]]; then
+              echo "Release $tag already exists and is published; refusing overwrite." >&2
+              exit 1
+            fi
+          else
+            body="P2: Brasil-base + 26 estados + DF. Todos os 28 pacotes devem ser verificados antes da publicação."
+            if [[ -n "$previous_tag" ]]; then
+              body="$body Rollback preservado em $previous_tag."
+            fi
+            release_id=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
+              -f tag_name="$tag" \
+              -f target_commitish='main' \
+              -f name="Mapas Brasil ${version}" \
+              -f body="$body" \
+              -F draft=true \
+              -F prerelease=false \
+              --jq '.id')
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "P2 draft release: $tag ($release_id); previous published: ${previous_tag:-none}; publish=$publish"
+
+  extract:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install pinned PMTiles CLI binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${PMTILES_VERSION#v}"
+          archive="go-pmtiles_${version}_Linux_x86_64.tar.gz"
+          url="https://github.com/protomaps/go-pmtiles/releases/download/${PMTILES_VERSION}/${archive}"
+          curl --fail --location --silent --show-error "$url" -o /tmp/pmtiles.tar.gz
+          echo "${PMTILES_LINUX_SHA256}  /tmp/pmtiles.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/pmtiles.tar.gz -C "$HOME/.local/bin" pmtiles
+          chmod +x "$HOME/.local/bin/pmtiles"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/pmtiles" --help >/dev/null
+
+      - name: Extract and verify ${{ matrix.id }}
+        env:
+          SOURCE_URL: ${{ needs.prepare.outputs.source_url }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+          SOURCE_DATE: ${{ needs.prepare.outputs.source_date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          asset='${{ matrix.asset }}'
+          pmtiles extract "$SOURCE_URL" "staging/$asset" \
+            --bbox='${{ matrix.bbox }}' \
+            --minzoom='${{ matrix.minZoom }}' \
+            --maxzoom='${{ matrix.maxZoom }}' \
+            --overfetch=0 \
+            --download-threads=4
+          pmtiles verify "staging/$asset"
+          size=$(stat -c '%s' "staging/$asset")
+          if (( size > MAX_ASSET_BYTES )); then
+            echo "$asset exceeds the 2 GiB GitHub Release asset safety limit: $size bytes" >&2
+            exit 1
+          fi
+          node scripts/create-build-metadata.mjs \
+            --ids '${{ matrix.id }}' \
+            --assets staging \
+            --release-version "$RELEASE_VERSION" \
+            --source-date "$SOURCE_DATE" \
+            --output "staging/${{ matrix.id }}.metadata.json"
+          echo "${{ matrix.id }}: $size bytes"
+
+      - name: Upload package and temporary metadata to P2 draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          upload_one() {
+            local file="$1"
+            local name
+            name=$(basename "$file")
+            old_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+              --jq ".[] | select(.name == \"${name}\") | .id" | head -n 1 || true)
+            if [[ -n "$old_id" ]]; then
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${old_id}"
+            fi
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary @"$file" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${name}" >/dev/null
+          }
+          upload_one 'staging/${{ matrix.asset }}'
+          upload_one 'staging/${{ matrix.id }}.metadata.json'
+
+  assemble:
+    needs: [prepare, extract]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Re-run repository verification before assembly
+        run: |
+          npm ci
+          npm test
+          npm run validate
+
+      - name: Download 28 temporary metadata records from draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p metadata control
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            --jq '.[] | select(.name | endswith(".metadata.json")) | [.id, .name] | @tsv' > /tmp/metadata-assets.tsv
+          count=$(grep -c . /tmp/metadata-assets.tsv || true)
+          if [[ "$count" -ne 28 ]]; then
+            echo "Expected 28 temporary metadata assets, got $count" >&2
+            cat /tmp/metadata-assets.tsv >&2
+            exit 1
+          fi
+          while IFS=$'\t' read -r asset_id name; do
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "metadata/${name}"
+          done < /tmp/metadata-assets.tsv
+
+      - name: Assemble complete manifest and provenance
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+          SOURCE_DATE: ${{ needs.prepare.outputs.source_date }}
+          SOURCE_URL: ${{ needs.prepare.outputs.source_url }}
+          SOURCE_BUILD: ${{ needs.prepare.outputs.source_build }}
+          PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          node scripts/merge-build-metadata.mjs \
+            --dir metadata \
+            --output control/build-metadata.json \
+            --release-version "$RELEASE_VERSION" \
+            --source-date "$SOURCE_DATE"
+          node scripts/build-manifest.mjs \
+            --metadata control/build-metadata.json \
+            --output control/maps-manifest.json \
+            --release-version "$RELEASE_VERSION" \
+            --generated-at "$generated_at"
+          jq -r '.maps[] | select(.available == true) | "\(.sha256)  \(.asset)"' \
+            control/maps-manifest.json > control/SHA256SUMS.txt
+          node --input-type=module - <<'NODE'
+          import { writeFile } from 'node:fs/promises';
+          const info = {
+            sourceProvider: 'Protomaps Basemap daily build',
+            sourceUrl: process.env.SOURCE_URL,
+            sourceBuild: process.env.SOURCE_BUILD,
+            sourceDate: process.env.SOURCE_DATE,
+            primaryMapData: 'OpenStreetMap',
+            primaryMapDataLicense: 'ODbL-1.0',
+            additionalOpenDataSources: true,
+            sourceLegalUrl: 'https://protomaps.com/legal',
+            osmCopyrightUrl: 'https://www.openstreetmap.org/copyright',
+            attribution: 'Protomaps © OpenStreetMap contributors',
+            pmtilesCli: process.env.PMTILES_VERSION,
+            releaseVersion: process.env.RELEASE_VERSION,
+            previousPublishedRelease: process.env.PREVIOUS_TAG || null,
+            packageCount: 28,
+            generation: 'GitHub Actions matrix; max-parallel=4; HTTP Range Requests'
+          };
+          await writeFile('control/SOURCE_INFO.json', JSON.stringify(info, null, 2) + '\n');
+          NODE
+          node scripts/validate-manifest.mjs control/maps-manifest.json catalog/states.json
+          available=$(jq '[.maps[] | select(.available == true)] | length' control/maps-manifest.json)
+          if [[ "$available" -ne 28 ]]; then
+            echo "Manifest must expose all 28 packages; got $available" >&2
+            exit 1
+          fi
+
+      - name: Verify all PMTiles against GitHub release digest index
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" > control/release-assets.json
+          node scripts/verify-release-index.mjs \
+            --manifest control/maps-manifest.json \
+            --assets control/release-assets.json \
+            --require-all true
+
+      - name: Upload manifest, checksums and source info
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in control/maps-manifest.json control/SHA256SUMS.txt control/SOURCE_INFO.json; do
+            name=$(basename "$file")
+            old_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+              --jq ".[] | select(.name == \"${name}\") | .id" | head -n 1 || true)
+            if [[ -n "$old_id" ]]; then
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${old_id}"
+            fi
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary @"$file" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${name}" >/dev/null
+          done
+
+      - name: Remove temporary metadata assets and verify final release index
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            --jq '.[] | select(.name | endswith(".metadata.json")) | .id' > /tmp/temp-asset-ids.txt
+          while read -r asset_id; do
+            [[ -n "$asset_id" ]] && gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          done < /tmp/temp-asset-ids.txt
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" > control/final-assets.json
+          node scripts/verify-release-index.mjs \
+            --manifest control/maps-manifest.json \
+            --assets control/final-assets.json \
+            --require-all true
+          final_count=$(jq 'length' control/final-assets.json)
+          if [[ "$final_count" -ne 31 ]]; then
+            echo "Expected 31 final assets (28 PMTiles + 3 control files), got $final_count" >&2
+            jq -r '.[].name' control/final-assets.json >&2
+            exit 1
+          fi
+          for required in maps-manifest.json SHA256SUMS.txt SOURCE_INFO.json; do
+            jq -e --arg name "$required" 'any(.[]; .name == $name)' control/final-assets.json >/dev/null
+          done
+
+      - name: Publish only after full verification and only from main
+        if: ${{ needs.prepare.outputs.publish == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_NAME" != 'main' ]]; then
+            echo 'Publishing is allowed only from main.' >&2
+            exit 1
+          fi
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            -F prerelease=false >/dev/null
+          is_draft=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.draft')
+          [[ "$is_draft" == 'false' ]] || { echo 'Release remained draft after publish request.' >&2; exit 1; }
+
+      - name: P2 release summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          total=$(jq '[.maps[].size] | add' control/maps-manifest.json)
+          largest=$(jq -r '.maps | max_by(.size) | "\(.id) \(.size)"' control/maps-manifest.json)
+          echo "28 packages verified"
+          echo "Total bytes: $total"
+          echo "Largest package: $largest"
+          echo "Release tag: ${{ needs.prepare.outputs.release_tag }}"
+          echo "Publish requested: ${{ needs.prepare.outputs.publish }}"
