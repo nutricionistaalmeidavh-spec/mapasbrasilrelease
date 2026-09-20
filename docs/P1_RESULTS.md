@@ -7,7 +7,8 @@ Data da execução: 2026-09-20
 - Provedor de basemap: Protomaps Basemap daily build
 - Build: `20260920`
 - URL-fonte: `https://build.protomaps.com/20260920.pmtiles`
-- Dados-base: OpenStreetMap
+- Fonte primária de dados: OpenStreetMap
+- Outras fontes abertas: podem ser incorporadas pelo Protomaps Basemap; detalhes/avisos devem seguir `https://protomaps.com/legal`
 - CLI: `go-pmtiles` / `pmtiles` v1.31.2
 - Binário Linux x86_64 verificado antes da execução por SHA-256 `3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f`
 
@@ -33,11 +34,13 @@ Os arquivos foram validados com `pmtiles verify`, depois pelo verificador do rep
   - `SHA256SUMS.txt`
   - `SOURCE_INFO.json`
 
+`SOURCE_INFO.json` é o registro de proveniência detalhado do release: identifica o Protomaps como provedor do basemap, OpenStreetMap como fonte primária, informa que o basemap pode conter outras fontes abertas e aponta para as páginas de atribuição/licenciamento aplicáveis.
+
 ## Evidência CI
 
 Workflow: `P1 generate real map packages`
 
-Run: `35520505858`
+Run validado inicialmente: `35520505858`
 
 O run concluiu com sucesso incluindo:
 
