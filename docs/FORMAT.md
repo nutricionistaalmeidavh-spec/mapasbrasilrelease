@@ -18,8 +18,10 @@ ac al ap am ba ce df es go ma mt ms mg pa pb pr pe pi rj rn rs ro rr sc sp se to
 - `schemaVersion`: versão inteira do contrato; P0 aceita somente `1`;
 - `releaseVersion`: `YYYY.MM.PATCH`;
 - `generatedAt`: timestamp UTC ISO-8601;
-- `source`: provedor e licença-base dos dados;
+- `source`: fonte primária e licença-base que exigem atribuição no contrato v1;
 - `maps`: lista ordenada dos 28 pacotes.
+
+No schema v1, `source` permanece `OpenStreetMap` / `ODbL-1.0` como referência primária de dados e atribuição. Quando o arquivo distribuído é um *Produced Work* preparado por outro provedor ou incorpora fontes abertas adicionais, a proveniência completa do release fica em `SOURCE_INFO.json`; o campo compacto `source` não deve ser interpretado como uma lista exaustiva de todas as fontes do basemap.
 
 Cada entrada de `maps` contém `id`, `name`, `kind`, `available`, `version`, `asset`, `size`, `sha256`, `minZoom`, `maxZoom`, `bounds` e `sourceDate`.
 
