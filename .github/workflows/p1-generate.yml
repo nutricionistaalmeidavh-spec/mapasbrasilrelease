@@ -128,8 +128,12 @@ jobs:
             sourceUrl: process.env.SOURCE_URL,
             sourceBuild: process.env.SOURCE_BUILD,
             sourceDate: process.env.SOURCE_DATE,
-            mapData: 'OpenStreetMap',
-            mapDataLicense: 'ODbL-1.0',
+            primaryMapData: 'OpenStreetMap',
+            primaryMapDataLicense: 'ODbL-1.0',
+            additionalOpenDataSources: true,
+            sourceLegalUrl: 'https://protomaps.com/legal',
+            osmCopyrightUrl: 'https://www.openstreetmap.org/copyright',
+            attribution: 'Protomaps © OpenStreetMap contributors',
             pmtilesCli: process.env.PMTILES_VERSION
           };
           await writeFile('release-staging/SOURCE_INFO.json', JSON.stringify(info, null, 2) + '\n');
@@ -165,7 +169,7 @@ jobs:
               -f tag_name="$RELEASE_TAG" \
               -f target_commitish="main" \
               -f name="Mapas Brasil ${RELEASE_VERSION}" \
-              -f body="P1: brasil-base e São Paulo. Fonte Protomaps/OpenStreetMap ${SOURCE_DATE}. Draft até homologação." \
+              -f body="P1: brasil-base e São Paulo. Fonte Protomaps Basemap ${SOURCE_DATE}, baseada principalmente em OpenStreetMap e outras fontes abertas. Draft até homologação." \
               -F draft=true \
               -F prerelease=false \
               --jq '.id')
